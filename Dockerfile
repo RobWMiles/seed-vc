@@ -47,7 +47,7 @@ RUN pip install \
         "requests" \
         "scipy==1.13.1" \
         "librosa==0.10.2" \
-        "huggingface-hub>=0.28.1" \
+        "huggingface-hub==0.25.2" \
         "munch==4.0.0" \
         "einops==0.8.0" \
         "descript-audio-codec==1.0.0" \
@@ -60,11 +60,23 @@ RUN pip install \
         "python-dotenv" \
         "accelerate"
 
+# huggingface-hub 0.26+ removed `proxies` + `resume_download` from
+# the ModelHubMixin._from_pretrained call path, but BigVGAN (used by
+# Seed-VC for vocoding) declares those as required keyword-only args
+# in its `_from_pretrained` override. Result with the upstream
+# `>=0.28.1` pin: `TypeError: BigVGAN._from_pretrained() missing 2
+# required keyword-only arguments`, every job fails. 0.25.2 is the
+# last release that still passes them and is compatible with our
+# transformers==4.46.3 (which requires >=0.23.2).
+
 # Pre-fetch SVC weights (~2 GB) so the first job doesn't stall behind
 # a HuggingFace download. Path layout matches Seed-VC's hf_utils helper
 # (./checkpoints/hf_cache → resolved by `cache_dir='/app/checkpoints'`).
+# Note: hf_transfer extra is installed AT THE PINNED 0.25.2 — using
+# `pip install --upgrade` here would silently reinstall hub at latest
+# and bring back the BigVGAN incompatibility.
 ENV HF_HUB_ENABLE_HF_TRANSFER=1
-RUN pip install --upgrade "huggingface_hub[hf_transfer]" && \
+RUN pip install "huggingface_hub[hf_transfer]==0.25.2" && \
     python -c "from huggingface_hub import hf_hub_download; \
         hf_hub_download('Plachta/Seed-VC', 'DiT_seed_v2_uvit_whisper_base_f0_44k_bigvgan_pruned_ft_ema_v2.pth', cache_dir='/app/checkpoints'); \
         hf_hub_download('Plachta/Seed-VC', 'config_dit_mel_seed_uvit_whisper_base_f0_44k.yml', cache_dir='/app/checkpoints'); \
