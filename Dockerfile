@@ -32,11 +32,16 @@ RUN pip install \
         "torchaudio==2.4.0" \
         --index-url https://download.pytorch.org/whl/cu121
 
-# Seed-VC's general Python deps. ALL package specs are quoted so the
-# shell doesn't try to interpret `>=` as a stdout redirection — that
-# is what blew up the previous build (`huggingface-hub>=0.28.1`
-# silently became `huggingface-hub` + a redirect to file `0.28.1`,
-# and pip then errored on the truncated request).
+# Seed-VC inference deps only. ALL specs quoted so the shell doesn't
+# try to interpret `>=` as a stdout redirection.
+#
+# The upstream requirements.txt also lists `funasr`, `modelscope`,
+# `resemblyzer`, and `jiwer` — these are only imported by Seed-VC's
+# eval / real-time-GUI scripts, NOT by `inference.py`. funasr in
+# particular pins torch < 2.4 which conflicts with our torch==2.4.0
+# layer above; pulling those four out fixes the build and shaves
+# ~2 GB off the image. If you ever need eval.py inside the worker,
+# add them back to a separate optional layer.
 RUN pip install \
         "runpod" \
         "requests" \
@@ -49,15 +54,11 @@ RUN pip install \
         "pydub==0.25.1" \
         "transformers==4.46.3" \
         "soundfile==0.12.1" \
-        "modelscope==1.18.1" \
-        "funasr==1.1.5" \
         "numpy==1.26.4" \
         "hydra-core==1.3.2" \
         "pyyaml" \
         "python-dotenv" \
-        "accelerate" \
-        "resemblyzer" \
-        "jiwer==3.0.3"
+        "accelerate"
 
 # Pre-fetch SVC weights (~2 GB) so the first job doesn't stall behind
 # a HuggingFace download. Path layout matches Seed-VC's hf_utils helper
