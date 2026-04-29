@@ -113,28 +113,56 @@ def _download(url: str, dest: str) -> str:
     return dest
 
 
+def _ffmpeg(args: list[str], step_name: str) -> None:
+    """Run ffmpeg and surface stderr on failure — handler bubbles the
+    output up to RunPod so the dashboard shows what actually broke
+    instead of a generic non-zero exit."""
+    proc = subprocess.run(
+        ["ffmpeg", "-y", "-loglevel", "error", *args],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"ffmpeg {step_name} failed (rc={proc.returncode}): {proc.stderr.strip()[:500]}"
+        )
+
+
 def _trim_to_30s(input_path: str, output_path: str) -> str:
     """Cut <input_path> to its first 30 s for use as the SVC reference.
     Seed-VC uses 1-30 s of reference, anything past that is wasted GPU
-    work on the encoder. We keep the trim ffmpeg-side rather than relying
-    on the model to truncate internally."""
-    subprocess.check_call(
+    work on the encoder."""
+    _ffmpeg(
         [
-            "ffmpeg",
-            "-y",
-            "-loglevel",
-            "error",
-            "-i",
-            input_path,
-            "-t",
-            "30",
-            "-ar",
-            "44100",
-            "-ac",
-            "1",
+            "-i", input_path,
+            "-t", "30",
+            "-ar", "44100",
+            "-ac", "1",
             output_path,
         ],
-        timeout=60,
+        "trim-30s",
+    )
+    return output_path
+
+
+def _normalize_source(input_path: str, output_path: str) -> str:
+    """Re-encode the source song to a known WAV format. The download
+    helper saves it with no real extension (we can't trust the upload
+    URL's content-type), and Seed-VC's inference.py uses librosa
+    which is mostly forgiving but occasionally chokes on
+    extension-less files or odd codec variants. A round-trip through
+    ffmpeg gives us a clean 44.1 kHz mono WAV that librosa accepts
+    every time."""
+    _ffmpeg(
+        [
+            "-i", input_path,
+            "-ar", "44100",
+            "-ac", "1",
+            "-c:a", "pcm_s16le",
+            output_path,
+        ],
+        "normalize-source",
     )
     return output_path
 
@@ -185,7 +213,24 @@ def _run_inference(
         "True",
     ]
     LOGGER.info("running inference: %s", " ".join(cmd))
-    subprocess.check_call(cmd, cwd=REPO_ROOT, timeout=600)
+    proc = subprocess.run(
+        cmd,
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=600,
+    )
+    # Capture stdout + stderr on failure so the RunPod dashboard
+    # shows the real Python traceback instead of a generic exit code.
+    if proc.returncode != 0:
+        tail_stdout = (proc.stdout or "").strip().splitlines()[-30:]
+        tail_stderr = (proc.stderr or "").strip().splitlines()[-30:]
+        details = "\n".join(["[stdout]", *tail_stdout, "[stderr]", *tail_stderr])
+        LOGGER.error("inference subprocess failed (rc=%s):\n%s", proc.returncode, details)
+        raise RuntimeError(
+            f"inference.py failed (rc={proc.returncode}): "
+            f"{(proc.stderr or '').strip()[-400:]}"
+        )
 
     # inference.py writes vc_<source>_<target>_<la>_<ds>_<cfg>.wav into
     # output_dir. Pick the most recently modified file.
@@ -195,7 +240,14 @@ def _run_inference(
         if f.lower().endswith(".wav")
     ]
     if not candidates:
-        raise RuntimeError("Seed-VC produced no .wav output")
+        # Surface inference logs even on "no output" — sometimes
+        # inference.py exits 0 but silently skipped writing the file.
+        tail_stdout = (proc.stdout or "").strip().splitlines()[-20:]
+        LOGGER.error("Seed-VC produced no .wav. stdout tail:\n%s", "\n".join(tail_stdout))
+        raise RuntimeError(
+            f"Seed-VC produced no .wav output. "
+            f"Last stdout: {(proc.stdout or '').strip()[-300:]}"
+        )
     return max(candidates, key=os.path.getmtime)
 
 
@@ -213,7 +265,13 @@ def handler(job: dict[str, Any]) -> dict[str, Any]:
 
     work_dir = tempfile.mkdtemp(prefix="seedvc_")
     try:
-        source_path = _download(source_url, os.path.join(work_dir, "source.audio"))
+        raw_source = _download(source_url, os.path.join(work_dir, "source_raw.audio"))
+        # Round-trip the source through ffmpeg first — file from the
+        # signed-storage download has no proper extension, and librosa
+        # (used by inference.py) occasionally fails to identify the
+        # codec without one. A normalized 44.1k mono WAV always loads.
+        source_path = _normalize_source(raw_source, os.path.join(work_dir, "source.wav"))
+
         raw_target = _download(target_url, os.path.join(work_dir, "target_raw.audio"))
         target_path = _trim_to_30s(raw_target, os.path.join(work_dir, "target.wav"))
 
@@ -237,8 +295,15 @@ def handler(job: dict[str, Any]) -> dict[str, Any]:
             "mime_type": "audio/wav",
         }
     except Exception as e:
-        LOGGER.error("job failed: %s\n%s", e, traceback.format_exc())
-        return {"error": f"seedvc_failed: {e}"}
+        # Trim the traceback so the JSON output stays compact in
+        # RunPod's dashboard but keep the message + last few frames
+        # so we can diagnose without SSH'ing into the worker.
+        tb_tail = "\n".join(traceback.format_exc().strip().splitlines()[-12:])
+        LOGGER.error("job failed: %s\n%s", e, tb_tail)
+        return {
+            "error": f"seedvc_failed: {e}",
+            "traceback": tb_tail,
+        }
 
 
 if __name__ == "__main__":
