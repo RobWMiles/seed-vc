@@ -175,6 +175,7 @@ def _run_inference(
     diffusion_steps: int = 30,
     semi_tone_shift: int = 0,
     auto_f0_adjust: bool = True,
+    inference_cfg_rate: float = 0.7,
 ) -> str:
     """Run Seed-VC and return the path to the produced WAV."""
     _ensure_models_loaded()
@@ -202,7 +203,7 @@ def _run_inference(
         "--length-adjust",
         "1.0",
         "--inference-cfg-rate",
-        "0.7",
+        str(inference_cfg_rate),
         "--f0-condition",
         "True",
         "--auto-f0-adjust",
@@ -262,6 +263,7 @@ def handler(job: dict[str, Any]) -> dict[str, Any]:
     diffusion_steps = int(job_input.get("diffusion_steps", 30))
     semi_tone_shift = int(job_input.get("semi_tone_shift", 0))
     auto_f0_adjust = bool(job_input.get("auto_f0_adjust", True))
+    inference_cfg_rate = float(job_input.get("inference_cfg_rate", 0.7))
 
     work_dir = tempfile.mkdtemp(prefix="seedvc_")
     try:
@@ -284,6 +286,7 @@ def handler(job: dict[str, Any]) -> dict[str, Any]:
             diffusion_steps=diffusion_steps,
             semi_tone_shift=semi_tone_shift,
             auto_f0_adjust=auto_f0_adjust,
+            inference_cfg_rate=inference_cfg_rate,
         )
 
         with open(result_path, "rb") as f:
