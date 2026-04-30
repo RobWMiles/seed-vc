@@ -178,7 +178,11 @@ def _run_inference(
     inference_cfg_rate: float = 0.7,
 ) -> str:
     """Run Seed-VC and return the path to the produced WAV."""
-    _ensure_models_loaded()
+    # NOTE: do not call `_ensure_models_loaded()` here. The subprocess
+    # below loads its own model copy into its own CUDA context; loading
+    # them into the parent too just doubles GPU memory usage and pushes
+    # us into OOM territory at higher diffusion-step counts. The parent
+    # process never reads from `_models`, so the preload is dead weight.
 
     # We invoke the upstream `inference.main` via subprocess for now —
     # the function is one big script body and forking a child keeps the
@@ -310,10 +314,7 @@ def handler(job: dict[str, Any]) -> dict[str, Any]:
 
 
 if __name__ == "__main__":
-    # Warm the models eagerly so the first real job is fast. Failures
-    # here are non-fatal — we'd rather start serving than crash-loop.
-    try:
-        _ensure_models_loaded()
-    except Exception as e:
-        LOGGER.warning("preload failed (will retry per-job): %s", e)
+    # Don't preload models here. Each job runs `inference.py` in a
+    # subprocess that loads its own model copy; loading them in the
+    # parent too just doubles GPU memory and risks OOM during inference.
     runpod.serverless.start({"handler": handler})
